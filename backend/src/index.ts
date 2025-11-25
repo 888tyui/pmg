@@ -262,13 +262,6 @@ app.get("/health", (_req, res) => {
   res.json({ ok: true });
 });
 
-// Return bundler address (fund destination) for clients (from env)
-app.get("/irys-fund-address", async (_req, res) => {
-  const address = process.env.IRYS_FUND_ADDRESS || null;
-  if (!address) return res.status(500).json({ error: "no_address" });
-  res.json({ address });
-});
-
 // Provide recent blockhash via server-side RPC
 app.get("/solana/recent-blockhash", async (_req, res) => {
   try {

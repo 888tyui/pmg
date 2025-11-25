@@ -37,7 +37,6 @@ PAYMENT_MIN_TOKENS=10   # minimum token amount (converted to USD off-chain)
 
 Optional:
 
-- `IRYS_FUND_ADDRESS` – bundler deposit address for CLI funding flows.
 - `POSTGRES_URL` – alternate env name if Railway exposes it.
 
 ### Install & Run
@@ -71,8 +70,6 @@ npm start
   - Returns recent push logs in descending order.
 - `GET /latest?owner=<pubkey>&repo=<name>`
   - Returns a single latest record matching filters.
-- `GET /irys-fund-address`
-  - Returns `IRYS_FUND_ADDRESS` from `.env` (optional).
 - `POST /payments/verify`
   - Verifies an SPL token transfer (used for repo registration + OTP credits).
   - Body: `{ txSig, payer, purpose, repoName }`.
