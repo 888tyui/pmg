@@ -15,6 +15,7 @@ import http from "http";
 import open from "open";
 import { fileURLToPath, pathToFileURL } from "url";
 import { createRequire } from "module";
+import { backendJson } from "../utils/http.js";
 
 async function postPushLog(payload: any) {
   try {
@@ -47,19 +48,41 @@ async function postPushLog(payload: any) {
   }
 }
 
+function parseOwners(input?: string): string[] {
+  if (!input) return [];
+  return input
+    .split(",")
+    .map((v) => v.trim())
+    .filter((v) => v.length > 0);
+}
+
 export default function registerPushCommand(program: Command) {
   program
     .command("push")
     .description(
       "Bundle current git repo and upload to Arweave via Irys (encrypt if private)."
     )
-    .action(async () => {
+    .option(
+      "--multisig-owners <pubkeys>",
+      "Comma-separated list of public keys that must approve pushes"
+    )
+    .option(
+      "--multisig-threshold <n>",
+      "Number of multisig approvals required (defaults to ceil(len/2))"
+    )
+    .action(async (opts: { multisigOwners?: string; multisigThreshold?: string }) => {
       if (!isGitRepo()) {
         console.error(chalk.red("This directory is not a Git repository."));
         process.exit(1);
       }
       const repoCfg = readRepoConfig();
       const userCfg = readUserConfig();
+      const backendBase = getBackendUrl();
+      const multisigOwners = parseOwners(opts.multisigOwners);
+      const multisigThreshold =
+        typeof opts.multisigThreshold === "string"
+          ? Number(opts.multisigThreshold)
+          : undefined;
       // Auto-commit uncommitted changes before bundling
       try {
         const status = execSync("git status --porcelain", {
@@ -202,7 +225,6 @@ export default function registerPushCommand(program: Command) {
           built.outputFiles.find((f: any) => f.path.endsWith(".js"))?.text ||
           built.outputFiles[0]?.text ||
           "";
-        const backendBase = getBackendUrl();
         let doneResolve: (() => void) | null = null;
         const donePromise = new Promise<void>(
           (resolve) => (doneResolve = resolve)
@@ -417,6 +439,24 @@ export default function registerPushCommand(program: Command) {
               new Promise<void>((resolve) => setTimeout(resolve, 1200)),
             ]);
           } catch {}
+          if (multisigOwners.length) {
+            try {
+              await handleMultisigFlow({
+                owners: multisigOwners,
+                threshold: multisigThreshold,
+                repoCfg,
+                userCfg,
+                repoName: repo,
+                pushTx: txId,
+              });
+            } catch (err: any) {
+              console.error(
+                chalk.red(
+                  `Multisig setup failed: ${err?.message || String(err)}`
+                )
+              );
+            }
+          }
         }
         // Browser flow finished: clean up and exit CLI
         try {
@@ -431,4 +471,232 @@ export default function registerPushCommand(program: Command) {
         // no-op; cleanup handled before exit on success
       }
     });
+}
+
+async function handleMultisigFlow({
+  owners,
+  threshold,
+  repoCfg,
+  userCfg,
+  repoName,
+  pushTx,
+}: {
+  owners: string[];
+  threshold?: number;
+  repoCfg: { repoId?: string };
+  userCfg: { publicKey?: string };
+  repoName: string;
+  pushTx: string;
+}) {
+  const ownerPk = userCfg.publicKey;
+  if (!ownerPk) {
+    throw new Error("Not logged in. Run `permagit login` first.");
+  }
+  const uniqueOwners = Array.from(new Set(owners.map((o) => o.trim()).filter(Boolean)));
+  if (!uniqueOwners.includes(ownerPk)) {
+    uniqueOwners.push(ownerPk);
+  }
+  console.log(chalk.gray("Preparing multisig payment transaction..."));
+  const payment = await backendJson<{
+    txB64: string;
+    amountAtomic: string;
+    destination: string;
+    mint: string;
+  }>("/payments/create", {
+    body: { payer: ownerPk, purpose: "multisig_setup" },
+  });
+  const paymentSig = await openPaymentUi({
+    txB64: payment.txB64,
+    owner: ownerPk,
+    destination: payment.destination,
+    mint: payment.mint,
+    amountAtomic: payment.amountAtomic,
+  });
+  if (!paymentSig) {
+    throw new Error("wallet_signature_missing");
+  }
+  console.log(chalk.gray("Confirming payment on backend..."));
+  await backendJson("/payments/verify", {
+    body: {
+      txSig: paymentSig,
+      payer: ownerPk,
+      purpose: "multisig_setup",
+      repoName,
+    },
+  });
+  await backendJson("/multisig/setup", {
+    body: {
+      repoId: repoCfg.repoId || undefined,
+      owner: ownerPk,
+      name: repoName,
+      pushTx,
+      signers: uniqueOwners,
+      threshold,
+      paymentTxSig: paymentSig,
+    },
+  });
+  console.log(
+    chalk.green("Multisig registered. Waiting for owners to approve push.")
+  );
+}
+
+async function openPaymentUi(payload: {
+  txB64: string;
+  owner: string;
+  destination: string;
+  mint: string;
+  amountAtomic: string;
+}): Promise<string> {
+  const __filename = fileURLToPath(import.meta.url);
+  const __dirname = path.dirname(__filename);
+  const uiEntry = path.resolve(__dirname, "../../src/ui/PaymentApp.tsx");
+  // @ts-ignore
+  const { build } = await import("esbuild");
+  const req = createRequire(import.meta.url);
+  const globalsPath = req.resolve("@esbuild-plugins/node-globals-polyfill");
+  const stdlibPath = req.resolve("node-stdlib-browser");
+  const globalsMod: any = await import(pathToFileURL(globalsPath).href);
+  const NodeGlobalsPolyfillPlugin = globalsMod.NodeGlobalsPolyfillPlugin;
+  const stdLibBrowserMod: any = await import(pathToFileURL(stdlibPath).href);
+  const stdLibBrowser = stdLibBrowserMod.default || stdLibBrowserMod;
+  const shimPath = req.resolve("node-stdlib-browser/helpers/esbuild/shim");
+  const coreAliasPlugin = {
+    name: "core-alias",
+    setup(b: any) {
+      const aliasMap: Record<string, string> = stdLibBrowser as any;
+      const keys = Object.keys(aliasMap);
+      const re = new RegExp(
+        `^(${keys.map((k) => k.replace(/[-/]/g, "\\$&")).join("|")})$`
+      );
+      b.onResolve({ filter: re }, (args: any) => {
+        try {
+          const targetPath = aliasMap[args.path];
+          if (!targetPath) return null;
+          const absPath = req.resolve(targetPath);
+          return { path: absPath };
+        } catch {
+          return null;
+        }
+      });
+    },
+  };
+  const built = await build({
+    entryPoints: [uiEntry],
+    bundle: true,
+    write: false,
+    platform: "browser",
+    target: ["es2020"],
+    jsx: "automatic",
+    format: "iife",
+    mainFields: ["browser", "module", "main"],
+    conditions: ["browser", "default"],
+    define: {
+      "process.env.NODE_ENV": '"production"',
+      global: "window",
+    },
+    inject: [shimPath],
+    plugins: [
+      coreAliasPlugin,
+      NodeGlobalsPolyfillPlugin({
+        process: true,
+        buffer: true,
+      }),
+    ],
+  });
+  const jsOut = Buffer.from(built.outputFiles[0].contents).toString("utf-8");
+  let doneResolve: (() => void) | null = null;
+  let signature: string | null = null;
+  const donePromise = new Promise<void>((resolve) => {
+    doneResolve = resolve;
+  });
+  const server = http.createServer((req, res) => {
+    try {
+      if (!req.url) return;
+      if (req.method === "GET" && req.url === "/") {
+        const html = `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Permagit - Payment</title>
+  <style>
+    body { margin:0; font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; background:#0d1117; color:#c9d1d9; }
+    .page { max-width:720px; margin:32px auto; padding:0 20px; }
+    .card { background:#161b22; border:1px solid #30363d; border-radius:8px; padding:20px; }
+    button { padding:12px 18px; border-radius:6px; border:none; background:#238636; color:white; font-size:15px; cursor:pointer; }
+    button:disabled { opacity:0.5; cursor:not-allowed; }
+    pre { background:#0b0f14; border:1px solid #30363d; border-radius:8px; padding:12px; font-family:ui-monospace, SFMono-Regular, Menlo; overflow:auto; }
+  </style>
+  <script src="https://unpkg.com/@solana/web3.js@1.95.0/lib/index.iife.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/buffer@6.0.3/index.min.js"></script>
+  <script>
+    if (typeof window !== 'undefined' && window.buffer && window.buffer.Buffer) {
+      window.Buffer = window.buffer.Buffer;
+      if (typeof globalThis !== 'undefined') globalThis.Buffer = window.buffer.Buffer;
+    }
+    window.__PERMAGIT__ = ${JSON.stringify(payload)};
+  </script>
+</head>
+<body>
+  <div id="root"></div>
+  <script src="/app.js"></script>
+</body>
+</html>`;
+        res.writeHead(200, { "Content-Type": "text/html" });
+        res.end(html);
+        return;
+      }
+      if (req.method === "GET" && req.url === "/app.js") {
+        res.writeHead(200, { "Content-Type": "application/javascript" });
+        res.end(jsOut);
+        return;
+      }
+      if (req.method === "POST" && req.url === "/signature") {
+        let body = "";
+        req.on("data", (c) => (body += c));
+        req.on("end", () => {
+          try {
+            const json = JSON.parse(body || "{}");
+            signature = String(json.signature || "");
+            res.writeHead(200);
+            res.end("ok");
+          } catch {
+            res.writeHead(400);
+            res.end("bad");
+          }
+        });
+        return;
+      }
+      if (req.method === "POST" && req.url === "/done") {
+        res.writeHead(200);
+        res.end("ok");
+        setImmediate(() => {
+          try {
+            server.close();
+          } catch {}
+        });
+        doneResolve && doneResolve();
+        return;
+      }
+      res.writeHead(404);
+      res.end("not found");
+    } catch {
+      res.writeHead(500);
+      res.end("error");
+    }
+  });
+  await new Promise<void>((resolve) =>
+    server.listen(0, "127.0.0.1", () => resolve())
+  );
+  const addr = server.address();
+  const port =
+    typeof addr === "object" && addr && "port" in addr ? (addr as any).port : 0;
+  const url = `http://localhost:${port}/`;
+  console.log(chalk.gray("Opening browser for payment approval..."));
+  await open(url);
+  await donePromise;
+  if (!signature) {
+    throw new Error("payment_signature_missing");
+  }
+  return signature;
 }

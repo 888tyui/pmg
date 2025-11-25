@@ -19,15 +19,16 @@ Opens a browser to connect your wallet and sign the static message “Permagit R
 #### Push
 
 ```
-permagit push
+permagit push [--multisig-owners pk1,pk2,...] [--multisig-threshold N]
 ```
 
 Flow:
 
 1. Auto-commit uncommitted changes.
 2. Create a `git bundle --all` of the repo.
-3. Open a browser UI for wallet connect → (optional) encrypt → fund → upload.
-4. On success, the CLI prints a concise summary (Repo/Branch/Visibility/Bundle size/TxID/Gateway) and exits immediately.
+3. Open a browser UI for wallet connect → optional AES encryption → Irys upload.
+4. If `--multisig-owners` is supplied, the CLI automatically requests a payment transaction from the backend, opens a Phantom window to sign/send it, and then registers multisig metadata for the new push. Owners are auto-de-duplicated and the repo owner is added if missing. Threshold defaults to `ceil(len/2)`, or you can override with `--multisig-threshold`.
+5. On success, the CLI prints a concise summary (Repo/Branch/Visibility/Bundle size/TxID/Gateway) and exits immediately.
 
 Private repos are encrypted in the browser using AES‑256‑GCM with a key derived from your login signature.
 

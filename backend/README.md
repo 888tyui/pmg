@@ -28,11 +28,11 @@ DATABASE_URL=postgres://USER:PASSWORD@HOST:PORT/DB
 # Solana RPC (paid RPC strongly recommended)
 SOLANA_RPC_URL=https://api.mainnet-beta.solana.com
 
-# Token payment settings (used by /payments/verify)
+# Token payment settings (used by /payments/create + /payments/verify)
 PAYMENT_TOKEN_MINT=<SPL_TOKEN_MINT_ADDRESS>
 PAYMENT_DESTINATION=<OUR_RECEIVING_WALLET>
 PAYMENT_TOKEN_DECIMALS=6
-PAYMENT_MIN_TOKENS=10   # minimum token amount (converted to USD off-chain)
+PAYMENT_MIN_TOKENS=10   # number of tokens to collect per payment
 ```
 
 Optional:
@@ -70,6 +70,9 @@ npm start
   - Returns recent push logs in descending order.
 - `GET /latest?owner=<pubkey>&repo=<name>`
   - Returns a single latest record matching filters.
+- `POST /payments/create`
+  - Returns a serialized SPL-token transfer transaction (base64) so the CLI can prompt wallets for approval.
+  - Body: `{ payer: "<PUBKEY>", purpose: "multisig_setup" }`
 - `POST /payments/verify`
   - Verifies an SPL token transfer (used for repo registration + OTP credits).
   - Body: `{ txSig, payer, purpose, repoName }`.
@@ -85,6 +88,8 @@ npm start
   - Redeems an OTP, returning `{ bundleTx, decryptKey }` once.
 - `POST /multisig/approve`
   - Stores a wallet-signed approval for a pending push (`signatureB64` of message `Permagit Push Approval:<txId>`).
+- `POST /multisig/setup`
+  - Finalizes multisig configuration for a push after a confirmed payment. Creates/updates the repo record and tracks signer metadata.
 - `GET /multisig/status/:repoId/:txId`
   - Returns approval counts + signer list for a pending push.
 

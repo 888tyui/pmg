@@ -2,9 +2,21 @@ import express from "express";
 import cors from "cors";
 import { getPool, initSchema } from "./db.js";
 import dotenv from "dotenv";
-import { Connection, PublicKey } from "@solana/web3.js";
+import {
+  Connection,
+  PublicKey,
+  TransactionMessage,
+  VersionedTransaction,
+} from "@solana/web3.js";
 import { randomUUID, randomBytes } from "crypto";
 import nacl from "tweetnacl";
+import {
+  TOKEN_PROGRAM_ID,
+  ASSOCIATED_TOKEN_PROGRAM_ID,
+  getAssociatedTokenAddressSync,
+  createAssociatedTokenAccountInstruction,
+  createTransferInstruction,
+} from "@solana/spl-token";
 
 dotenv.config();
 
@@ -27,6 +39,12 @@ const MIN_PAYMENT_ATOMIC =
   PAYMENT_MIN_TOKENS && !Number.isNaN(PAYMENT_TOKEN_DECIMALS)
     ? decimalToAtomic(PAYMENT_MIN_TOKENS, PAYMENT_TOKEN_DECIMALS)
     : 0n;
+const PAYMENT_TOKEN_MINT_PK = process.env.PAYMENT_TOKEN_MINT
+  ? new PublicKey(process.env.PAYMENT_TOKEN_MINT)
+  : null;
+const PAYMENT_DESTINATION_PK = process.env.PAYMENT_DESTINATION
+  ? new PublicKey(process.env.PAYMENT_DESTINATION)
+  : null;
 
 function decimalToAtomic(value: string, decimals: number): bigint {
   if (typeof value !== "string") {
@@ -197,6 +215,76 @@ function formatPaymentRow(row: any) {
     consumedAt: row.consumed_at,
     createdAt: row.created_at,
     metadata: row.metadata || {},
+  };
+}
+
+async function buildPaymentTransaction(payer: string) {
+  if (!PAYMENT_DESTINATION_PK || !PAYMENT_TOKEN_MINT_PK) {
+    throw new Error("payment_env_not_configured");
+  }
+  if (!MIN_PAYMENT_ATOMIC || MIN_PAYMENT_ATOMIC <= 0n) {
+    throw new Error("payment_amount_not_set");
+  }
+  const payerPk = new PublicKey(payer);
+  const connection = getSolanaConnection();
+  const payerAta = getAssociatedTokenAddressSync(
+    PAYMENT_TOKEN_MINT_PK,
+    payerPk
+  );
+  const destAta = getAssociatedTokenAddressSync(
+    PAYMENT_TOKEN_MINT_PK,
+    PAYMENT_DESTINATION_PK
+  );
+  const instructions: any[] = [];
+  const payerAtaInfo = await connection.getAccountInfo(payerAta);
+  if (!payerAtaInfo) {
+    instructions.push(
+      createAssociatedTokenAccountInstruction(
+        payerPk,
+        payerAta,
+        payerPk,
+        PAYMENT_TOKEN_MINT_PK,
+        TOKEN_PROGRAM_ID,
+        ASSOCIATED_TOKEN_PROGRAM_ID
+      )
+    );
+  }
+  const destAtaInfo = await connection.getAccountInfo(destAta);
+  if (!destAtaInfo) {
+    instructions.push(
+      createAssociatedTokenAccountInstruction(
+        payerPk,
+        destAta,
+        PAYMENT_DESTINATION_PK,
+        PAYMENT_TOKEN_MINT_PK,
+        TOKEN_PROGRAM_ID,
+        ASSOCIATED_TOKEN_PROGRAM_ID
+      )
+    );
+  }
+  instructions.push(
+    createTransferInstruction(
+      payerAta,
+      destAta,
+      payerPk,
+      MIN_PAYMENT_ATOMIC,
+      [],
+      TOKEN_PROGRAM_ID
+    )
+  );
+  const { blockhash } = await connection.getLatestBlockhash("finalized");
+  const message = new TransactionMessage({
+    payerKey: payerPk,
+    recentBlockhash: blockhash,
+    instructions,
+  }).compileToV0Message();
+  const tx = new VersionedTransaction(message);
+  const b64 = Buffer.from(tx.serialize()).toString("base64");
+  return {
+    txB64: b64,
+    amountAtomic: MIN_PAYMENT_ATOMIC.toString(),
+    destination: PAYMENT_DESTINATION_PK.toBase58(),
+    mint: PAYMENT_TOKEN_MINT_PK.toBase58(),
   };
 }
 
@@ -375,6 +463,28 @@ app.post("/payments/verify", async (req, res) => {
     res
       .status(400)
       .json({ error: "payment_verification_failed", message: err?.message || String(err) });
+  }
+});
+
+app.post("/payments/create", async (req, res) => {
+  try {
+    const { payer, purpose = "multisig_setup" } = req.body || {};
+    if (!payer || typeof payer !== "string") {
+      return res.status(400).json({ error: "payer_required" });
+    }
+    const tx = await buildPaymentTransaction(payer);
+    res.json({
+      txB64: tx.txB64,
+      amountAtomic: tx.amountAtomic,
+      destination: tx.destination,
+      mint: tx.mint,
+      purpose,
+    });
+  } catch (err: any) {
+    res.status(400).json({
+      error: "payment_create_failed",
+      message: err?.message || String(err),
+    });
   }
 });
 
@@ -723,6 +833,117 @@ app.get("/multisig/status/:repoId/:txId", async (req, res) => {
     });
   } catch (err) {
     res.status(500).json({ error: "multisig_status_failed" });
+  }
+});
+
+app.post("/multisig/setup", async (req, res) => {
+  try {
+    const {
+      repoId,
+      owner,
+      name,
+      pushTx,
+      signers,
+      threshold,
+      paymentTxSig,
+    } = req.body || {};
+    if (!pushTx) {
+      return res.status(400).json({ error: "push_tx_required" });
+    }
+    if (!paymentTxSig) {
+      return res.status(400).json({ error: "payment_required" });
+    }
+    const signerList = parseSigners(signers);
+    if (!signerList.length) {
+      return res.status(400).json({ error: "signers_required" });
+    }
+    const thresholdNumber =
+      typeof threshold === "number" ? threshold : Number(threshold);
+    const computedThreshold = calcThreshold(
+      signerList,
+      Number.isNaN(thresholdNumber) ? undefined : thresholdNumber
+    );
+    if (!computedThreshold) {
+      return res.status(400).json({ error: "invalid_threshold" });
+    }
+    const pool = getPool();
+    const paymentResult = await pool.query(
+      "SELECT * FROM payments WHERE tx_sig = $1",
+      [paymentTxSig]
+    );
+    if (!paymentResult.rows.length) {
+      return res.status(400).json({ error: "payment_not_found" });
+    }
+    const payment = paymentResult.rows[0];
+    if (payment.purpose !== "multisig_setup") {
+      return res.status(400).json({ error: "payment_wrong_purpose" });
+    }
+    if (payment.status !== "confirmed") {
+      return res.status(400).json({ error: "payment_not_confirmed" });
+    }
+    let repo = null;
+    if (repoId) {
+      const repoResult = await pool.query(
+        "SELECT * FROM repos WHERE id = $1 LIMIT 1",
+        [repoId]
+      );
+      repo = repoResult.rows[0] || null;
+    }
+    if (!repo && owner && name) {
+      repo = await getRepoByOwnerAndName(owner, name);
+    }
+    if (!repo) {
+      if (!owner || !name) {
+        return res.status(400).json({ error: "repo_identification_required" });
+      }
+      const newId = randomUUID();
+      const insert = await pool.query(
+        `
+        INSERT INTO repos (id, name, owner, is_private, is_multisig, threshold, signers, payment_tx)
+        VALUES ($1, $2, $3, false, true, $4, $5, $6)
+        RETURNING *
+      `,
+        [newId, name, owner, computedThreshold, JSON.stringify(signerList), paymentTxSig]
+      );
+      repo = insert.rows[0];
+    } else {
+      await pool.query(
+        `
+        UPDATE repos
+        SET is_multisig = true,
+            threshold = $1,
+            signers = $2,
+            payment_tx = COALESCE(payment_tx, $3)
+        WHERE id = $4
+      `,
+        [computedThreshold, JSON.stringify(signerList), paymentTxSig, repo.id]
+      );
+      const refreshed = await pool.query(
+        "SELECT * FROM repos WHERE id = $1",
+        [repo.id]
+      );
+      repo = refreshed.rows[0];
+    }
+    const multisigEntry = await ensureMultisigEntry(
+      repo,
+      pushTx,
+      undefined
+    );
+    res.json({
+      repo: formatRepoRow(repo),
+      multisig: multisigEntry
+        ? {
+            status: multisigEntry.status,
+            approvalsRequired: multisigEntry.approvals_required,
+            approvalsCount: multisigEntry.approvals_count,
+          }
+        : null,
+    });
+  } catch (err: any) {
+    res.status(400).json({
+      error: "multisig_setup_failed",
+      message: err?.message || String(err),
+    });
   }
 });
 
