@@ -79,7 +79,7 @@ export function getBackendUrl(): string {
     return cfg.backendUrl.trim().replace(/\/$/, '');
   }
   
-  return "https://api.permagit.io";
+  return "https://api2.permagit.io";
 }
 
 export function getIrysFundAddress(): string | null {
