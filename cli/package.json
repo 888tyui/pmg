@@ -1,11 +1,11 @@
 {
   "name": "permagit",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "description": "Permagit CLI",
   "type": "module",
   "bin": {
-    "permagit": "./dist/bin/permagit.js",
-    "git-remote-permagit": "./dist/bin/git-remote-permagit.js"
+    "permagit": "dist/bin/permagit.js",
+    "git-remote-permagit": "dist/bin/git-remote-permagit.js"
   },
   "keywords": [
     "git",
