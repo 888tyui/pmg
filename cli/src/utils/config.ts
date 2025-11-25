@@ -44,6 +44,7 @@ export function getRepoConfigPath(cwd = process.cwd()) {
 export interface RepoConfig {
   private?: boolean;
   repoId?: string;
+  repoName?: string;
 }
 
 export function readRepoConfig(cwd = process.cwd()): RepoConfig {

@@ -5,6 +5,7 @@ import {
   readRepoConfig,
   getBackendUrl,
   readUserConfig,
+  writeRepoConfig,
 } from "../utils/config.js";
 import fs from "fs";
 import os from "os";
@@ -15,6 +16,7 @@ import http from "http";
 import open from "open";
 import { fileURLToPath, pathToFileURL } from "url";
 import { createRequire } from "module";
+import readline from "readline";
 import { backendJson } from "../utils/http.js";
 import { openPaymentUi } from "../utils/paymentUi.js";
 
@@ -57,6 +59,23 @@ function parseOwners(input?: string): string[] {
     .filter((v) => v.length > 0);
 }
 
+async function promptInput(question: string, defaultValue?: string) {
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+  const promptText = defaultValue
+    ? `${question} (${defaultValue}): `
+    : `${question}: `;
+  return await new Promise<string>((resolve) => {
+    rl.question(promptText, (answer) => {
+      rl.close();
+      const trimmed = answer.trim();
+      resolve(trimmed.length ? trimmed : defaultValue || "");
+    });
+  });
+}
+
 export default function registerPushCommand(program: Command) {
   program
     .command("push")
@@ -76,7 +95,7 @@ export default function registerPushCommand(program: Command) {
         console.error(chalk.red("This directory is not a Git repository."));
         process.exit(1);
       }
-      const repoCfg = readRepoConfig();
+      let repoCfg = readRepoConfig();
       const userCfg = readUserConfig();
       const backendBase = getBackendUrl();
       const multisigOwners = parseOwners(opts.multisigOwners);
@@ -84,6 +103,10 @@ export default function registerPushCommand(program: Command) {
         typeof opts.multisigThreshold === "string"
           ? Number(opts.multisigThreshold)
           : undefined;
+      repoCfg = await ensureRepoRegistered({
+        repoCfg,
+        userCfg,
+      });
       // Auto-commit uncommitted changes before bundling
       try {
         const status = execSync("git status --porcelain", {
@@ -539,5 +562,72 @@ async function handleMultisigFlow({
   console.log(
     chalk.green("Multisig registered. Waiting for owners to approve push.")
   );
+}
+
+async function ensureRepoRegistered({
+  repoCfg,
+  userCfg,
+}: {
+  repoCfg: { repoId?: string; repoName?: string; private?: boolean };
+  userCfg: { publicKey?: string };
+}) {
+  if (repoCfg.repoId) return repoCfg;
+  const ownerPk = userCfg.publicKey;
+  if (!ownerPk) {
+    throw new Error("Not logged in. Run `permagit login` first.");
+  }
+  const defaultName = repoCfg.repoName || getRepoName();
+  const repoName = await promptInput(
+    "Enter repository name for Permagit",
+    defaultName
+  );
+  if (!repoName) {
+    throw new Error("Repository name is required.");
+  }
+  console.log(chalk.gray("Preparing repo registration payment..."));
+  const payment = await backendJson<{
+    txB64: string;
+    amountAtomic: string;
+    destination: string;
+    mint: string;
+  }>("/payments/create", {
+    body: { payer: ownerPk, purpose: "repo_init" },
+  });
+  const paymentSig = await openPaymentUi({
+    txB64: payment.txB64,
+    owner: ownerPk,
+    destination: payment.destination,
+    mint: payment.mint,
+    amountAtomic: payment.amountAtomic,
+  });
+  console.log(chalk.gray("Confirming repo registration payment..."));
+  await backendJson("/payments/verify", {
+    body: {
+      txSig: paymentSig,
+      payer: ownerPk,
+      purpose: "repo_init",
+      repoName,
+    },
+  });
+  const result = await backendJson<{
+    repo: { id: string; isPrivate: boolean };
+  }>("/repos", {
+    body: {
+      name: repoName,
+      owner: ownerPk,
+      isPrivate: Boolean(repoCfg.private),
+      signers: [],
+      threshold: undefined,
+      paymentTxSig: paymentSig,
+    },
+  });
+  const updated = writeRepoConfig(
+    { repoId: result.repo.id, repoName, private: repoCfg.private },
+    process.cwd()
+  );
+  console.log(
+    chalk.green(`Repo registered on backend as "${repoName}" (${result.repo.id})`)
+  );
+  return updated;
 }
 
