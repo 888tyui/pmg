@@ -82,11 +82,11 @@ Downloads a bundle from Irys Gateway and restores it to a Git repo. If `--encryp
 #### OTP sharing
 
 ```
-permagit otp request --payment <txSig> --bundle <txId>
+permagit otp request --bundle <txId>
 permagit otp redeem --otp <token>
 ```
 
-- `otp request` consumes a paid tx (purpose `otp_share`) and creates a one-time password + decrypt key tied to a bundle.
+- `otp request` now auto-generates a payment transaction for `purpose=otp_share`, opens Phantom for approval, verifies it with the backend, and returns an OTP + decrypt key tied to the given bundle.
 - `otp redeem` is primarily for verification/debugging; `permagit clone --otp` redeems automatically.
 
 #### Multisig approvals

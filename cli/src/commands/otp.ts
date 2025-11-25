@@ -3,26 +3,28 @@ import chalk from "chalk";
 import { backendJson } from "../utils/http.js";
 import { readRepoConfig, readUserConfig } from "../utils/config.js";
 import { getRepoName, isGitRepo } from "../utils/git.js";
+import { openPaymentUi } from "../utils/paymentUi.js";
 
 export default function registerOtpCommand(program: Command) {
   const otpCmd = new Command("otp").description("Manage OTP shares for private bundles.");
 
   otpCmd
     .command("request")
-    .description("Request a one-time password for a private bundle (requires payment).")
-    .requiredOption("--payment <txSig>", "Payment transaction signature for OTP issuance")
+    .description(
+      "Request a one-time password for a private bundle (auto-creates payment transaction)."
+    )
     .requiredOption("--bundle <txId>", "Arweave/Irys transaction id of the encrypted bundle")
     .option("--repo <name>", "Repository name (defaults to current repo config)")
     .option("--owner <pubkey>", "Owner public key (defaults to login)")
     .option("--key <base64>", "Custom decrypt key (base64). Generated if omitted.")
     .option("--expires <minutes>", "OTP expiry window in minutes (default 1440)")
     .action(async (opts: {
-      payment: string;
       bundle: string;
       repo?: string;
       owner?: string;
       key?: string;
       expires?: string;
+      payment?: string;
     }) => {
       try {
         const repoCfg = readRepoConfig();
@@ -42,14 +44,50 @@ export default function registerOtpCommand(program: Command) {
           }
         }
         const owner = opts.owner || userCfg.publicKey || null;
+        if (!owner) {
+          console.error(
+            chalk.red(
+              "Owner public key is required. Login first or pass --owner <pubkey>."
+            )
+          );
+          process.exit(1);
+        }
         const expiresInMinutes =
           typeof opts.expires === "string" ? Number(opts.expires) : undefined;
+        let paymentSig = opts.payment;
+        if (!paymentSig) {
+          console.log(chalk.gray("Preparing OTP payment transaction..."));
+          const paymentTx = await backendJson<{
+            txB64: string;
+            amountAtomic: string;
+            destination: string;
+            mint: string;
+          }>("/payments/create", {
+            body: { payer: owner, purpose: "otp_share" },
+          });
+          paymentSig = await openPaymentUi({
+            txB64: paymentTx.txB64,
+            owner,
+            destination: paymentTx.destination,
+            mint: paymentTx.mint,
+            amountAtomic: paymentTx.amountAtomic,
+          });
+          console.log(chalk.gray("Confirming OTP payment..."));
+          await backendJson("/payments/verify", {
+            body: {
+              txSig: paymentSig,
+              payer: owner,
+              purpose: "otp_share",
+              repoName: repoName,
+            },
+          });
+        }
         const body: any = {
           repoId,
           owner: owner || undefined,
           name: repoName || undefined,
           bundleTx: opts.bundle,
-          paymentTxSig: opts.payment,
+          paymentTxSig: paymentSig,
           decryptKey: opts.key,
           expiresInMinutes: Number.isFinite(expiresInMinutes)
             ? expiresInMinutes
