@@ -1,0 +1,14 @@
+# Node / TypeScript
+node_modules/
+dist/
+*.log
+*.tsbuildinfo
+
+# Environment / local config
+.env
+.permagit.json
+
+# OS cruft
+.DS_Store
+Thumbs.db
+
