@@ -26,7 +26,7 @@ Flow:
 
 1. Auto-commit uncommitted changes.
 2. Create a `git bundle --all` of the repo.
-3. If `.permagit.json` does not contain `repoId`, the CLI now prompts for a repo name, auto-generates the required payment transaction, runs it through Phantom, and registers the repo on the backend before continuing.
+3. If `.permagit.json` does not contain `repoId`, the CLI prompts for a repo name and silently registers it on the backend (no payment required) before continuing.
 4. Open a browser UI for wallet connect → optional AES encryption → Irys upload.
 4. If `--multisig-owners` is supplied, the CLI automatically requests a payment transaction from the backend, opens a Phantom window to sign/send it, and then registers multisig metadata for the new push. Owners are auto-de-duplicated and the repo owner is added if missing. Threshold defaults to `ceil(len/2)`, or you can override with `--multisig-threshold`.
 5. On success, the CLI prints a concise summary (Repo/Branch/Visibility/Bundle size/TxID/Gateway) and exits immediately.

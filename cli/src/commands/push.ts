@@ -584,31 +584,7 @@ async function ensureRepoRegistered({
   if (!repoName) {
     throw new Error("Repository name is required.");
   }
-  console.log(chalk.gray("Preparing repo registration payment..."));
-  const payment = await backendJson<{
-    txB64: string;
-    amountAtomic: string;
-    destination: string;
-    mint: string;
-  }>("/payments/create", {
-    body: { payer: ownerPk, purpose: "repo_init" },
-  });
-  const paymentSig = await openPaymentUi({
-    txB64: payment.txB64,
-    owner: ownerPk,
-    destination: payment.destination,
-    mint: payment.mint,
-    amountAtomic: payment.amountAtomic,
-  });
-  console.log(chalk.gray("Confirming repo registration payment..."));
-  await backendJson("/payments/verify", {
-    body: {
-      txSig: paymentSig,
-      payer: ownerPk,
-      purpose: "repo_init",
-      repoName,
-    },
-  });
+  console.log(chalk.gray("Registering repository on backend..."));
   const result = await backendJson<{
     repo: { id: string; isPrivate: boolean };
   }>("/repos", {
@@ -618,7 +594,7 @@ async function ensureRepoRegistered({
       isPrivate: Boolean(repoCfg.private),
       signers: [],
       threshold: undefined,
-      paymentTxSig: paymentSig,
+      paymentTxSig: undefined,
     },
   });
   const updated = writeRepoConfig(

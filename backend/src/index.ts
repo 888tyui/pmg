@@ -510,22 +510,25 @@ app.post("/repos", async (req, res) => {
   const client = await getPool().connect();
   try {
     await client.query("BEGIN");
-    const paymentResult = await client.query(
-      "SELECT * FROM payments WHERE tx_sig = $1 FOR UPDATE",
-      [paymentTxSig]
-    );
-    if (!paymentResult.rows.length) {
-      throw new Error("payment_not_found");
-    }
-    const payment = paymentResult.rows[0];
-    if (payment.purpose !== "repo_init") {
-      throw new Error("payment_wrong_purpose");
-    }
-    if (payment.status !== "confirmed") {
-      throw new Error("payment_not_confirmed");
-    }
-    if (payment.consumed_at) {
-      throw new Error("payment_already_consumed");
+    let payment: any = null;
+    if (paymentTxSig) {
+      const paymentResult = await client.query(
+        "SELECT * FROM payments WHERE tx_sig = $1 FOR UPDATE",
+        [paymentTxSig]
+      );
+      if (!paymentResult.rows.length) {
+        throw new Error("payment_not_found");
+      }
+      payment = paymentResult.rows[0];
+      if (payment.purpose !== "repo_init") {
+        throw new Error("payment_wrong_purpose");
+      }
+      if (payment.status !== "confirmed") {
+        throw new Error("payment_not_confirmed");
+      }
+      if (payment.consumed_at) {
+        throw new Error("payment_already_consumed");
+      }
     }
     const repoId = randomUUID();
     const insert = await client.query(
@@ -549,9 +552,11 @@ app.post("/repos", async (req, res) => {
     if (!insert.rows.length) {
       throw new Error("repo_exists");
     }
-    await client.query("UPDATE payments SET consumed_at = NOW() WHERE id = $1", [
-      payment.id,
-    ]);
+    if (payment?.id) {
+      await client.query("UPDATE payments SET consumed_at = NOW() WHERE id = $1", [
+        payment.id,
+      ]);
+    }
     await client.query("COMMIT");
     res.json({ repo: formatRepoRow(insert.rows[0]) });
   } catch (err: any) {
